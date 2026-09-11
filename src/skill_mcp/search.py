@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from abc import ABC, abstractmethod
 from difflib import SequenceMatcher
 
 from .models import SkillRecord
@@ -9,8 +10,27 @@ from .models import SkillRecord
 _TOKEN = re.compile(r"[\w-]+", re.UNICODE)
 
 
-class LexicalSearchIndex:
-    """Dependency-free search interface that can later be replaced by a semantic index."""
+class SearchProvider(ABC):
+    """Backend boundary for ranking installed skill discovery metadata."""
+
+    id: str
+
+    @abstractmethod
+    def search(
+        self,
+        task: str,
+        skills: list[SkillRecord],
+        *,
+        limit: int = 5,
+        include_hot: bool = False,
+    ) -> list[dict[str, object]]:
+        """Return ranked skill summaries for a natural-language task."""
+
+
+class LexicalSearchProvider(SearchProvider):
+    """Dependency-free, offline lexical and fuzzy ranking backend."""
+
+    id = "lexical"
 
     def search(
         self,
@@ -26,7 +46,7 @@ class LexicalSearchIndex:
         query_tokens = set(_TOKEN.findall(query))
         ranked: list[tuple[float, SkillRecord]] = []
         for skill in skills:
-            if skill.hot and not include_hot:
+            if skill.status != "active" or (skill.hot and not include_hot):
                 continue
             fields = " ".join(
                 [
@@ -56,7 +76,24 @@ class LexicalSearchIndex:
                 "description": skill.description,
                 "source": skill.source,
                 "hot": skill.hot,
+                "status": skill.status,
                 "score": round(score, 4),
             }
             for score, skill in ranked[: max(1, min(limit, 100))]
         ]
+
+
+class SemanticSearchProvider(SearchProvider, ABC):
+    """Optional future extension point for embedding-backed retrieval."""
+
+    id = "semantic"
+
+
+class HybridSearchProvider(SearchProvider, ABC):
+    """Optional future extension point for lexical plus semantic retrieval."""
+
+    id = "hybrid"
+
+
+# Backward-compatible import for callers of the pre-0.2 name.
+LexicalSearchIndex = LexicalSearchProvider

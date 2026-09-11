@@ -15,7 +15,7 @@ instruction assembly, lives behind optional adapters.
 - Recursive discovery of multiple `SKILL.md` folders in any repository layout
 - Persistent source, revision, install path, trust, adapter, and HOT metadata
 - Canonical IDs that safely distinguish same-named skills from different sources
-- A lightweight lexical/fuzzy discovery index with a replaceable search interface
+- A `SearchProvider` boundary with a dependency-free/offline `LexicalSearchProvider` default
 - Dynamic HOT tools plus `find_skills`, `load_skill`, `read_skill_asset`, and
   `list_installed_skills`
 - Live `notifications/tools/list_changed` when another CLI process changes HOT state
@@ -23,7 +23,9 @@ instruction assembly, lives behind optional adapters.
 - Traversal-safe text/binary asset reads
 - Explicit opt-in trust before CLI execution of allow-listed script types; no shell command
   construction and no script-execution MCP tool
-- Source refresh, per-skill uninstall, and source-wide removal
+- Non-mutating upstream reconciliation previews with explicit safe apply
+- Persistent `active`/`missing` state for skills removed upstream
+- Reproducible Top-1/3/5 retrieval evaluation over versioned natural-language query sets
 - Dependency-light MCP stdio transport
 
 ## Install
@@ -41,59 +43,66 @@ uv sync --all-groups
 uv run pytest
 ```
 
-State defaults to `~/.config/skill-mcp`. Set `SKILL_MCP_HOME` or pass `--home` to use a
-different registry and managed-source directory.
+State defaults to `~/.config/skilldock`. Set `SKILLDOCK_HOME` or pass `--home` to use a
+different registry and managed-source directory. The old `SKILL_MCP_HOME` variable and
+`skill-mcp` executable remain backward-compatible aliases. If only an existing legacy
+`~/.config/skill-mcp` directory is present, SkillDock continues using it without moving data.
 
 ## CLI
 
 Install every compatible skill in a repository:
 
 ```console
-skill-mcp install https://github.com/NomaDamas/k-skill
-skill-mcp install mattpocock/skills --all
+skilldock install https://github.com/NomaDamas/k-skill
+skilldock install mattpocock/skills --all
 ```
 
 Install selected skills and make them immediately visible as HOT tools:
 
 ```console
-skill-mcp install https://github.com/example/skills \
+skilldock install https://github.com/example/skills \
   --skill frontend-design --skill debugging --hot
 ```
 
 Install everything while selecting only a subset for HOT exposure:
 
 ```console
-skill-mcp install https://github.com/example/skills --all \
+skilldock install https://github.com/example/skills --all \
   --hot-skill frontend-design --hot-skill debugging
 ```
 
 Local directories use the same flow and are copied into managed storage:
 
 ```console
-skill-mcp install ./my-local-skills
+skilldock install ./my-local-skills
 ```
 
 Manage installed and HOT state independently:
 
 ```console
-skill-mcp list
-skill-mcp hot add frontend-design
-skill-mcp hot remove frontend-design
-skill-mcp hot list
-skill-mcp uninstall frontend-design
-skill-mcp source list
-skill-mcp source remove mattpocock/skills
-skill-mcp update
+skilldock list
+skilldock hot add frontend-design
+skilldock hot remove frontend-design
+skilldock hot list
+skilldock uninstall frontend-design
+skilldock source list
+skilldock source remove mattpocock/skills
+skilldock reconcile
+skilldock reconcile mattpocock/skills --apply
 ```
 
+`reconcile` is preview-only unless `--apply` is given. Applying refreshes installed metadata,
+instructions, and missing state, but does not install NEW skills or delete MISSING ones.
+`skilldock update` remains a backward-compatible shorthand for the safe apply behavior.
+
 Short names work only when unambiguous. If two sources contain `frontend-design`, use the
-canonical ID shown by `skill-mcp list`, for example
+canonical ID shown by `skilldock list`, for example
 `github:example/skills/frontend-design`.
 
 Start the MCP server:
 
 ```console
-skill-mcp serve
+skilldock serve
 ```
 
 Example host configuration:
@@ -102,7 +111,7 @@ Example host configuration:
 {
   "mcpServers": {
     "skills": {
-      "command": "skill-mcp",
+      "command": "skilldock",
       "args": ["serve"]
     }
   }
@@ -164,8 +173,8 @@ Installing instructions is not permission to execute their code. Script executio
 and disabled unless that skill was installed with `--allow-scripts`:
 
 ```console
-skill-mcp install ./trusted-skills --skill formatter --allow-scripts
-skill-mcp exec formatter scripts/format.py -- input.txt
+skilldock install ./trusted-skills --skill formatter --allow-scripts
+skilldock exec formatter scripts/format.py -- input.txt
 ```
 
 Execution resolves a real file below that installed skill's `scripts/` directory, accepts only
@@ -173,17 +182,20 @@ known interpreter suffixes, passes arguments as an array with `shell=False`, app
 and never turns input into a shell command. Opt-in trust still means the script can act with the
 user's operating-system permissions; inspect third-party code before enabling it.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and [SECURITY.md](SECURITY.md) for the design
-and threat model.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md),
+[docs/evaluation-baseline.md](docs/evaluation-baseline.md),
+[docs/compatibility.md](docs/compatibility.md), and [SECURITY.md](SECURITY.md).
 
 ## Tests
 
 ```console
 uv run pytest
 uv run ruff check .
-uv run python scripts/smoke_stdio.py --home ~/.config/skill-mcp
+uv run python scripts/smoke_stdio.py --home ~/.config/skilldock
+skilldock eval evals/retrieval_queries.yaml --min-skills 150
 ```
 
 The suite covers multi-source discovery, collisions, HOT inventory, persistence, restart,
 search/load behavior, uninstall and source isolation, path traversal, trust-gated execution,
-k-skill assembly, updates, and raw MCP stdio initialize/list/call notifications.
+k-skill assembly, reconciliation and missing state, pluggable search, retrieval metrics, updates,
+and raw MCP stdio initialize/list/call notifications.

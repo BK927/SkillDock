@@ -7,6 +7,8 @@ import shutil
 import stat
 import subprocess
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -107,6 +109,43 @@ class SourceManager:
             return MaterializedSource(identity=identity, path=target, revision=revision)
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
+            if backup.exists() and not target.exists():
+                os.replace(backup, target)
+            raise
+
+    @contextmanager
+    def preview_refresh(
+        self, identity: SourceIdentity, *, ref: str | None = None
+    ) -> Iterator[MaterializedSource]:
+        """Materialize a fresh source snapshot without changing the installed copy."""
+        staging = self.staging_dir / f"reconcile-{uuid.uuid4().hex}"
+        try:
+            revision = self._populate(identity, staging, ref=ref)
+            yield MaterializedSource(identity=identity, path=staging, revision=revision)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def commit_preview(self, preview: MaterializedSource) -> MaterializedSource:
+        """Atomically make a previously previewed snapshot the managed source copy."""
+        resolved = preview.path.resolve()
+        allowed = self.staging_dir.resolve()
+        try:
+            resolved.relative_to(allowed)
+        except ValueError as exc:
+            raise SourceError(f"Refusing to commit preview outside staging: {resolved}") from exc
+        target = self.sources_dir / preview.identity.storage_key
+        backup = self.staging_dir / f"backup-{uuid.uuid4().hex}"
+        try:
+            if target.exists():
+                os.replace(target, backup)
+            os.replace(preview.path, target)
+            shutil.rmtree(backup, ignore_errors=True)
+            return MaterializedSource(
+                identity=preview.identity,
+                path=target,
+                revision=preview.revision,
+            )
+        except Exception:
             if backup.exists() and not target.exists():
                 os.replace(backup, target)
             raise

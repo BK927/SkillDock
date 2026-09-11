@@ -20,9 +20,10 @@ RegistryStore ---------> registry.json (atomic replacement)
        |
        +---- HOT -------> ToolFactory -------> individual skill__* tools
        |
-       `---- non-HOT --> LexicalSearchIndex -> find_skills -> load_skill
-                              |
-                              `--------------> future semantic index
+       `---- non-HOT --> SearchProvider ------> find_skills -> load_skill
+                              | LexicalSearchProvider (default/offline)
+                              | HybridSearchProvider (future extension point)
+                              ` SemanticSearchProvider (future extension point)
 ```
 
 ## Responsibilities
@@ -39,9 +40,10 @@ and content layout intentionally remain independent concepts.
 with its relative path, so equal display names never overwrite each other. Short selectors are
 accepted only when they resolve uniquely.
 
-`LexicalSearchIndex` searches name, description, metadata, tags, and source with weighted token,
-substring, and fuzzy similarity. Its narrow interface allows a semantic implementation later
-without changing the runtime or MCP surface.
+`SearchProvider` is the only ranking boundary used by `SkillRuntime`.
+`LexicalSearchProvider` searches name, description, metadata, tags, and source with weighted
+token, substring, and fuzzy similarity. Hybrid and semantic provider types are extension points,
+not installed backends; the default remains offline and dependency-light.
 
 `ToolFactory` rebuilds the inventory from registry state. Four system tools are always present;
 only records with `hot=true` get an individual activation tool. Tool names are persisted so
@@ -70,7 +72,9 @@ The display name remains the frontmatter `name`. APIs return both.
 
 ## Update semantics
 
-Refresh builds a new snapshot in staging and swaps it into the managed source path. Installed
-records are refreshed by relative path, preserving HOT and trust choices. Newly discovered skills
-remain uninstalled, and removed paths remain visible as stale records rather than silently deleting
-user choices; a future release can add an explicit reconciliation policy.
+`skilldock reconcile` builds a fresh snapshot in staging and compares it without changing the
+managed source or registry. It reports NEW, UPDATED, and MISSING paths. `--apply` atomically swaps
+the snapshot and refreshes installed records by relative path while preserving HOT and trust
+choices. Newly discovered skills remain uninstalled. Removed paths remain registered with
+`status=missing`, are excluded from search and MCP tools, and return a clear load error rather than
+an incidental filesystem exception. `skilldock update` remains an alias for the safe apply path.

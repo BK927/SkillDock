@@ -112,3 +112,35 @@ def test_running_server_notifies_and_refreshes_when_hot_registry_changes(tmp_pat
         assert runtime.get_skill("systematic-debugging").tool_name in names
     finally:
         process.close()
+
+
+def test_server_does_not_claim_unimplemented_2026_subscription_semantics(tmp_path):
+    process = MCPProcess(tmp_path / "version-home")
+    try:
+        initialized = process.request(1, "initialize", {"protocolVersion": "2026-07-28"})
+        assert initialized["result"]["protocolVersion"] == "2025-11-25"
+    finally:
+        process.close()
+
+
+def test_reconnect_refreshes_inventory_when_a_host_ignored_notification(tmp_path, source_a):
+    home = tmp_path / "reconnect-home"
+    runtime = SkillRuntime(home)
+    skill = runtime.install(str(source_a), selectors=["frontend-design"])[0]
+
+    first = MCPProcess(home)
+    try:
+        first.request(1, "initialize", {"protocolVersion": "2025-11-25"})
+        initial = first.request(2, "tools/list")
+        assert skill.tool_name not in {tool["name"] for tool in initial["result"]["tools"]}
+    finally:
+        first.close()
+
+    runtime.set_hot(skill.id, True)
+    reconnected = MCPProcess(home)
+    try:
+        reconnected.request(1, "initialize", {"protocolVersion": "2025-11-25"})
+        refreshed = reconnected.request(2, "tools/list")
+        assert skill.tool_name in {tool["name"] for tool in refreshed["result"]["tools"]}
+    finally:
+        reconnected.close()

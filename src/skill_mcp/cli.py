@@ -2,18 +2,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 from .config import default_home
 from .errors import SkillMCPError
+from .evaluation import evaluate_retrieval, write_evaluation
 from .mcp_server import StdioMCPServer
 from .runtime import SkillRuntime
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="skill-mcp",
+        prog="skilldock",
         description="Install and expose Agent Skills through one universal MCP runtime.",
     )
     parser.add_argument(
@@ -69,6 +71,23 @@ def build_parser() -> argparse.ArgumentParser:
     update = subcommands.add_parser("update", help="Refresh one source or all installed sources.")
     update.add_argument("source", nargs="?")
 
+    reconcile = subcommands.add_parser(
+        "reconcile", help="Preview upstream NEW, UPDATED, and MISSING skills."
+    )
+    reconcile.add_argument("source", nargs="?")
+    reconcile.add_argument(
+        "--apply",
+        action="store_true",
+        help="Refresh installed records and mark missing paths without installing or deleting.",
+    )
+
+    evaluate = subcommands.add_parser(
+        "eval", help="Evaluate discovery top-k quality from a YAML query set."
+    )
+    evaluate.add_argument("dataset", type=Path)
+    evaluate.add_argument("--output", type=Path, help="Write the complete JSON result.")
+    evaluate.add_argument("--min-skills", type=int, default=0)
+
     load = subcommands.add_parser("load", help="Load complete instructions outside MCP.")
     load.add_argument("skill")
     load.add_argument("--runtime-mode", choices=("generic", "dolshoi"), default="generic")
@@ -91,6 +110,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
     parser = build_parser()
     args = parser.parse_args(argv)
     runtime = SkillRuntime(args.home)
@@ -121,9 +144,17 @@ def dispatch(runtime: SkillRuntime, args: argparse.Namespace) -> Any:
         skills = runtime.list_skills()
         return {
             "installedCount": len(skills),
-            "hotCount": sum(skill.hot for skill in skills),
-            "hot": [_skill_summary(skill) for skill in skills if skill.hot],
-            "searchable": [_skill_summary(skill) for skill in skills if not skill.hot],
+            "activeCount": sum(skill.status == "active" for skill in skills),
+            "hotCount": sum(skill.hot and skill.status == "active" for skill in skills),
+            "hot": [
+                _skill_summary(skill) for skill in skills if skill.hot and skill.status == "active"
+            ],
+            "searchable": [
+                _skill_summary(skill)
+                for skill in skills
+                if not skill.hot and skill.status == "active"
+            ],
+            "missing": [_skill_summary(skill) for skill in skills if skill.status == "missing"],
         }
     if args.command == "hot":
         if args.hot_command == "list":
@@ -142,6 +173,14 @@ def dispatch(runtime: SkillRuntime, args: argparse.Namespace) -> Any:
         }
     if args.command == "update":
         return {"updatedSources": [source.to_dict() for source in runtime.update(args.source)]}
+    if args.command == "reconcile":
+        return runtime.reconcile(args.source, apply=args.apply)
+    if args.command == "eval":
+        result = evaluate_retrieval(runtime, args.dataset, min_skills=args.min_skills)
+        if args.output:
+            write_evaluation(result, args.output)
+            result["output"] = str(args.output.resolve())
+        return result
     if args.command == "load":
         return runtime.load_skill(args.skill, runtime_mode=args.runtime_mode)
     if args.command == "read":
@@ -163,8 +202,10 @@ def _skill_summary(skill: Any) -> dict[str, Any]:
         "source": skill.source,
         "adapter": skill.adapter,
         "hot": skill.hot,
+        "status": skill.status,
+        "missingSince": skill.missing_since,
         "trusted": skill.trusted,
-        "toolName": skill.tool_name if skill.hot else None,
+        "toolName": skill.tool_name if skill.hot and skill.status == "active" else None,
     }
 
 
@@ -172,7 +213,7 @@ def _print_result(result: Any, *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return
-    if isinstance(result, dict) and "installedCount" in result:
+    if isinstance(result, dict) and "installed" in result and "installedCount" in result:
         print(f"Installed Skills: {result['installedCount']}")
         print(f"HOT Skills: {result['hotCount']}")
         for item in result.get("installed", []):
@@ -181,6 +222,7 @@ def _print_result(result: Any, *, as_json: bool) -> None:
         return
     if isinstance(result, dict) and {"hot", "searchable"} <= result.keys():
         print(f"Installed Skills: {result['installedCount']}")
+        print(f"Active Skills: {result['activeCount']}")
         print(f"HOT Skills: {result['hotCount']}")
         print("\nHOT")
         for item in result["hot"]:
@@ -188,6 +230,48 @@ def _print_result(result: Any, *, as_json: bool) -> None:
         print("\nSEARCHABLE")
         for item in result["searchable"]:
             print(f"  {item['name']}  ({item['id']})")
+        if result["missing"]:
+            print("\nMISSING")
+            for item in result["missing"]:
+                marker = " [HOT]" if item["hot"] else ""
+                print(f"  {item['name']}{marker}  ({item['id']})")
+        return
+    if isinstance(result, dict) and {"applied", "sources", "totals"} <= result.keys():
+        action = "Applied" if result["applied"] else "Preview"
+        totals = result["totals"]
+        print(f"Source changes ({action.lower()}):")
+        print(
+            f"  + {totals['new']} newly discovered skills\n"
+            f"  ~ {totals['updated']} installed skills updated\n"
+            f"  * {totals['missing']} installed skills no longer exist upstream"
+        )
+        for source in result["sources"]:
+            print(f"\n{source['sourceId']}")
+            for heading, key in (("NEW", "new"), ("UPDATED", "updated"), ("MISSING", "missing")):
+                if not source[key]:
+                    continue
+                print(f"\n{heading}")
+                for item in source[key]:
+                    marker = " [HOT]" if item.get("hot") else ""
+                    print(f"  {item['name']}{marker}  ({item['path']})")
+        if not result["applied"]:
+            print("\nNo registry choices changed. Re-run with --apply to refresh safe state.")
+        return
+    if isinstance(result, dict) and {"provider", "metrics", "corpus"} <= result.keys():
+        metrics = result["metrics"]
+        corpus = result["corpus"]
+        print(
+            f"Provider: {result['provider']}\n"
+            f"Corpus: {corpus['activeSkillCount']} active "
+            f"({corpus['hotCount']} HOT, {corpus['discoveryCount']} discovery)\n"
+            f"Queries: {metrics['count']}\n"
+            f"Top-1: {metrics['top1']:.1%}\n"
+            f"Top-3: {metrics['top3']:.1%}\n"
+            f"Top-5: {metrics['top5']:.1%}\n"
+            f"MRR@5: {metrics['mrrAt5']:.4f}"
+        )
+        if result.get("output"):
+            print(f"Full result: {result['output']}")
         return
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

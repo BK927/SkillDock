@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -12,7 +13,7 @@ from .config import ensure_home
 from .errors import DiscoveryError, RegistryError, SkillNotFoundError
 from .models import RegistryState, SkillCandidate, SkillRecord, SourceRecord
 from .registry import RegistryStore, resolve_skill, resolve_source
-from .search import LexicalSearchIndex
+from .search import LexicalSearchProvider, SearchProvider
 from .security import execute_script, read_asset
 from .sources import MaterializedSource, SourceManager, source_identity_from_record
 
@@ -23,12 +24,17 @@ class SkillRuntime:
         home: Path,
         *,
         adapters: AdapterRegistry | None = None,
-        search_index: LexicalSearchIndex | None = None,
+        search_provider: SearchProvider | None = None,
+        search_index: SearchProvider | None = None,
     ):
+        if search_provider is not None and search_index is not None:
+            raise ValueError("Pass search_provider or the legacy search_index, not both")
         self.home = ensure_home(home)
         self.registry = RegistryStore(self.home)
         self.adapters = adapters or AdapterRegistry()
-        self.search_index = search_index or LexicalSearchIndex()
+        self.search_provider = search_provider or search_index or LexicalSearchProvider()
+        # Compatibility for code that inspected the old runtime attribute.
+        self.search_index = self.search_provider
         self.sources = SourceManager(self.home)
 
     def discover_source(self, source: str, *, ref: str | None = None) -> list[SkillCandidate]:
@@ -113,6 +119,11 @@ class SkillRuntime:
                         relative_path=candidate.relative_path,
                         install_path=str(materialized.path / candidate.relative_path),
                         revision=materialized.revision,
+                        status="active",
+                        missing_since=None,
+                        content_digest=self._candidate_digest(
+                            candidate, source_record, materialized.path
+                        ),
                         hot=(
                             hot
                             or candidate.relative_path in selected_hot_paths
@@ -138,7 +149,7 @@ class SkillRuntime:
     def list_skills(self) -> list[SkillRecord]:
         return sorted(
             self.registry.load().skills.values(),
-            key=lambda item: (not item.hot, item.name, item.id),
+            key=lambda item: (item.status != "active", not item.hot, item.name, item.id),
         )
 
     def list_sources(self) -> list[SourceRecord]:
@@ -150,6 +161,7 @@ class SkillRuntime:
     def load_skill(self, selector: str, *, runtime_mode: str = "generic") -> dict[str, Any]:
         state = self.registry.load()
         skill = resolve_skill(state, selector)
+        self._ensure_available(skill)
         source = state.sources.get(skill.source_id)
         if source is None:
             raise RegistryError(f'Source record "{skill.source_id}" is missing')
@@ -161,6 +173,7 @@ class SkillRuntime:
             "source": skill.source,
             "adapter": skill.adapter,
             "hot": skill.hot,
+            "status": skill.status,
             "instructions": instructions,
         }
 
@@ -174,12 +187,17 @@ class SkillRuntime:
         skills = list(self.registry.load().skills.values())
         return {
             "task": task,
-            "matches": self.search_index.search(task, skills, limit=limit, include_hot=include_hot),
+            "provider": self.search_provider.id,
+            "matches": self.search_provider.search(
+                task, skills, limit=limit, include_hot=include_hot
+            ),
         }
 
     def set_hot(self, selector: str, hot: bool) -> SkillRecord:
         def mutation(state: RegistryState) -> SkillRecord:
             skill = resolve_skill(state, selector)
+            if hot:
+                self._ensure_available(skill)
             skill.hot = hot
             skill.updated_at = _now()
             return skill
@@ -187,7 +205,9 @@ class SkillRuntime:
         return self.registry.update(mutation)
 
     def read_skill_asset(self, selector: str, path: str) -> dict[str, Any]:
-        return read_asset(self.get_skill(selector), path)
+        skill = self.get_skill(selector)
+        self._ensure_available(skill)
+        return read_asset(skill, path)
 
     def exec_skill_script(
         self,
@@ -197,7 +217,9 @@ class SkillRuntime:
         *,
         timeout: float = 60,
     ) -> dict[str, Any]:
-        return execute_script(self.get_skill(selector), script, args, timeout=timeout)
+        skill = self.get_skill(selector)
+        self._ensure_available(skill)
+        return execute_script(skill, script, args, timeout=timeout)
 
     def uninstall(self, selector: str) -> SkillRecord:
         def mutation(state: RegistryState) -> SkillRecord:
@@ -221,12 +243,28 @@ class SkillRuntime:
         self.registry.update(mutation)
         return source, removed
 
+    def reconcile(self, selector: str | None = None, *, apply: bool = False) -> dict[str, Any]:
+        """Preview upstream changes, optionally applying safe record refreshes.
+
+        Applying never installs newly discovered skills and never deletes missing records.
+        """
+        report, _ = self._reconcile_sources(selector, apply=apply)
+        return report
+
     def update(self, selector: str | None = None) -> list[SourceRecord]:
+        """Backward-compatible safe refresh (equivalent to reconcile --apply)."""
+        _, updated = self._reconcile_sources(selector, apply=True)
+        return updated
+
+    def _reconcile_sources(
+        self, selector: str | None, *, apply: bool
+    ) -> tuple[dict[str, Any], list[SourceRecord]]:
         initial = self.registry.load()
         targets = (
             [resolve_source(initial, selector)] if selector else list(initial.sources.values())
         )
         updated: list[SourceRecord] = []
+        source_reports: list[dict[str, Any]] = []
         for old_source in targets:
             identity = source_identity_from_record(
                 old_source.id,
@@ -234,31 +272,183 @@ class SkillRuntime:
                 old_source.normalized_source,
                 old_source.source_type,
             )
-            materialized = self.sources.refresh(identity)
-            candidates = self.adapters.discover(materialized.path, old_source.source_type)
-            by_path = {candidate.relative_path: candidate for candidate in candidates}
-            now = _now()
+            installed = [
+                item for item in initial.skills.values() if item.source_id == old_source.id
+            ]
+            with self.sources.preview_refresh(identity) as preview:
+                candidates = self.adapters.discover(preview.path, old_source.source_type)
+                preview_source = _source_record_for_materialized(old_source, preview)
+                report = self._build_reconciliation(
+                    old_source, installed, candidates, preview_source, preview.path
+                )
+                source_reports.append(report)
+                if not apply:
+                    continue
 
-            with self.registry.transaction() as state:
-                current_source = state.sources[old_source.id]
-                current_source.install_path = str(materialized.path)
-                current_source.revision = materialized.revision
-                current_source.updated_at = now
-                for skill in [
-                    item for item in state.skills.values() if item.source_id == old_source.id
-                ]:
-                    candidate = by_path.get(skill.relative_path)
-                    if not candidate:
-                        continue
-                    skill.name = candidate.name
-                    skill.description = candidate.description
-                    skill.adapter = candidate.adapter
-                    skill.metadata = candidate.metadata
-                    skill.install_path = str(materialized.path / candidate.relative_path)
-                    skill.revision = materialized.revision
-                    skill.updated_at = now
-                updated.append(current_source)
-        return updated
+                by_path = {candidate.relative_path: candidate for candidate in candidates}
+                digests = {
+                    candidate.relative_path: self._candidate_digest(
+                        candidate, preview_source, preview.path
+                    )
+                    for candidate in candidates
+                }
+                materialized = self.sources.commit_preview(preview)
+                now = _now()
+                with self.registry.transaction() as state:
+                    current_source = state.sources[old_source.id]
+                    current_source.install_path = str(materialized.path)
+                    current_source.revision = materialized.revision
+                    current_source.updated_at = now
+                    for skill in [
+                        item for item in state.skills.values() if item.source_id == old_source.id
+                    ]:
+                        candidate = by_path.get(skill.relative_path)
+                        if not candidate:
+                            if skill.status != "missing":
+                                skill.missing_since = now
+                            skill.status = "missing"
+                            skill.install_path = str(materialized.path / skill.relative_path)
+                            skill.updated_at = now
+                            continue
+                        skill.name = candidate.name
+                        skill.description = candidate.description
+                        skill.adapter = candidate.adapter
+                        skill.metadata = candidate.metadata
+                        skill.install_path = str(materialized.path / candidate.relative_path)
+                        skill.revision = materialized.revision
+                        skill.status = "active"
+                        skill.missing_since = None
+                        skill.content_digest = digests[candidate.relative_path]
+                        skill.updated_at = now
+                    updated.append(current_source)
+
+        totals = {
+            key: sum(item["counts"][key] for item in source_reports)
+            for key in ("new", "updated", "missing", "unchanged")
+        }
+        return (
+            {
+                "applied": apply,
+                "sourceCount": len(source_reports),
+                "totals": totals,
+                "sources": source_reports,
+            },
+            updated,
+        )
+
+    def _build_reconciliation(
+        self,
+        source: SourceRecord,
+        installed: list[SkillRecord],
+        candidates: list[SkillCandidate],
+        preview_source: SourceRecord,
+        preview_root: Path,
+    ) -> dict[str, Any]:
+        installed_by_path = {skill.relative_path: skill for skill in installed}
+        candidates_by_path = {candidate.relative_path: candidate for candidate in candidates}
+        new = [
+            _candidate_summary(candidate)
+            for candidate in candidates
+            if candidate.relative_path not in installed_by_path
+        ]
+        changed: list[dict[str, Any]] = []
+        unchanged = 0
+        for skill in installed:
+            candidate = candidates_by_path.get(skill.relative_path)
+            if not candidate:
+                continue
+            digest = self._candidate_digest(candidate, preview_source, preview_root)
+            if (
+                skill.status != "active"
+                or skill.name != candidate.name
+                or skill.description != candidate.description
+                or skill.adapter != candidate.adapter
+                or skill.metadata != candidate.metadata
+                or skill.content_digest != digest
+            ):
+                changed.append(
+                    {
+                        "id": skill.id,
+                        "name": candidate.name,
+                        "path": candidate.relative_path,
+                        "hot": skill.hot,
+                    }
+                )
+            else:
+                unchanged += 1
+        missing = [
+            {
+                "id": skill.id,
+                "name": skill.name,
+                "path": skill.relative_path,
+                "hot": skill.hot,
+                "status": skill.status,
+            }
+            for skill in installed
+            if skill.relative_path not in candidates_by_path
+        ]
+        return {
+            "sourceId": source.id,
+            "source": source.source,
+            "fromRevision": source.revision,
+            "toRevision": preview_source.revision,
+            "counts": {
+                "new": len(new),
+                "updated": len(changed),
+                "missing": len(missing),
+                "unchanged": unchanged,
+            },
+            "new": new,
+            "updated": changed,
+            "missing": missing,
+        }
+
+    def _candidate_digest(
+        self, candidate: SkillCandidate, source: SourceRecord, source_root: Path
+    ) -> str:
+        provisional = SkillRecord(
+            id="preview",
+            name=candidate.name,
+            description=candidate.description,
+            source_id=source.id,
+            source=source.source,
+            source_type=source.source_type,
+            adapter=candidate.adapter,
+            relative_path=candidate.relative_path,
+            install_path=str(source_root / candidate.relative_path),
+            revision=source.revision,
+            metadata=candidate.metadata,
+        )
+        modes = ("generic", "dolshoi") if candidate.adapter == "k-skill" else ("generic",)
+        rendered = [
+            self.adapters.load_instructions(provisional, source, runtime_mode=mode)
+            for mode in modes
+        ]
+        payload = json.dumps(
+            {
+                "name": candidate.name,
+                "description": candidate.description,
+                "metadata": candidate.metadata,
+                "instructions": rendered,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _ensure_available(skill: SkillRecord) -> None:
+        if skill.status == "missing":
+            raise SkillNotFoundError(
+                f'Skill "{skill.id}" is marked missing because it no longer exists upstream. '
+                "Reconcile the source or uninstall the stale record."
+            )
+        if not Path(skill.install_path).is_dir():
+            raise SkillNotFoundError(
+                f'Installed files for skill "{skill.id}" are unavailable. '
+                "Run `skilldock reconcile --apply` to refresh its source state."
+            )
 
 
 def _select_candidates(
@@ -286,6 +476,30 @@ def _select_candidates(
         if matches[0] not in selected:
             selected.append(matches[0])
     return selected
+
+
+def _source_record_for_materialized(
+    old: SourceRecord, materialized: MaterializedSource
+) -> SourceRecord:
+    return SourceRecord(
+        id=old.id,
+        source=old.source,
+        normalized_source=old.normalized_source,
+        source_type=old.source_type,
+        install_path=str(materialized.path),
+        revision=materialized.revision,
+        installed_at=old.installed_at,
+        updated_at=old.updated_at,
+    )
+
+
+def _candidate_summary(candidate: SkillCandidate) -> dict[str, Any]:
+    return {
+        "name": candidate.name,
+        "description": candidate.description,
+        "path": candidate.relative_path,
+        "adapter": candidate.adapter,
+    }
 
 
 def _canonical_id(source_id: str, candidate: SkillCandidate) -> str:

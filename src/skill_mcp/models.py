@@ -44,6 +44,9 @@ class SkillRecord:
     relative_path: str
     install_path: str
     revision: str | None
+    status: str = "active"
+    missing_since: str | None = None
+    content_digest: str = ""
     hot: bool = False
     trusted: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)

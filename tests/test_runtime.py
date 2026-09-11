@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
 from conftest import make_skill
 
-from skill_mcp.errors import AmbiguousSkillError, SecurityError
+from skill_mcp.errors import AmbiguousSkillError, SecurityError, SkillNotFoundError
 from skill_mcp.mcp_server import ToolFactory
 from skill_mcp.runtime import SkillRuntime
 
@@ -154,3 +155,39 @@ def test_install_all_can_select_only_a_hot_subset(runtime, source_a):
 
     assert len(installed) == 2
     assert {skill.name for skill in installed if skill.hot} == {"frontend-design"}
+
+
+def test_reconcile_previews_then_applies_new_updated_and_missing_without_choice_mutation(
+    runtime, source_a
+):
+    runtime.install(str(source_a), hot_selectors=["frontend-design"])
+    make_skill(
+        source_a,
+        "nested/systematic-debugging",
+        "systematic-debugging",
+        "Diagnose failures with a revised evidence workflow.",
+        "# Revised debugging",
+    )
+    make_skill(source_a, "new-capability", "new-capability", "A newly published capability.")
+    shutil.rmtree(source_a / "frontend-design")
+
+    preview = runtime.reconcile()
+    assert preview["applied"] is False
+    assert preview["totals"] == {"new": 1, "updated": 1, "missing": 1, "unchanged": 0}
+    assert runtime.get_skill("frontend-design").status == "active"
+    assert len(runtime.list_skills()) == 2
+
+    applied = runtime.reconcile(apply=True)
+    assert applied["applied"] is True
+    assert len(runtime.list_skills()) == 2
+    missing = runtime.get_skill("frontend-design")
+    assert missing.status == "missing"
+    assert missing.hot is True
+    assert missing.missing_since
+    assert missing.tool_name not in ToolFactory(runtime).build()
+    with pytest.raises(SkillNotFoundError, match="marked missing"):
+        runtime.load_skill(missing.id)
+    assert runtime.get_skill("systematic-debugging").status == "active"
+    assert "# Revised debugging" in runtime.load_skill("systematic-debugging")["instructions"]
+    with pytest.raises(SkillNotFoundError, match="not installed"):
+        runtime.get_skill("new-capability")

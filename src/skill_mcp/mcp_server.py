@@ -11,12 +11,11 @@ from . import __version__
 from .errors import SkillMCPError
 from .runtime import SkillRuntime
 
-LATEST_PROTOCOL_VERSION = "2026-07-28"
+LATEST_PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
     "2024-11-05",
     "2025-03-26",
     "2025-06-18",
-    "2025-11-25",
     LATEST_PROTOCOL_VERSION,
 }
 
@@ -127,7 +126,11 @@ class ToolFactory:
                             "source": skill.source,
                             "adapter": skill.adapter,
                             "hot": skill.hot,
-                            "toolName": skill.tool_name if skill.hot else None,
+                            "status": skill.status,
+                            "missingSince": skill.missing_since,
+                            "toolName": (
+                                skill.tool_name if skill.hot and skill.status == "active" else None
+                            ),
                         }
                         for skill in self.runtime.list_skills()
                     ]
@@ -136,7 +139,7 @@ class ToolFactory:
         ]
         tools = {item.name: item for item in definitions}
         for skill in self.runtime.list_skills():
-            if not skill.hot:
+            if not skill.hot or skill.status != "active":
                 continue
             tool_name = skill.tool_name
             description = f"Load the {skill.name} Agent Skill. Use when: {skill.description}"
@@ -167,7 +170,7 @@ class StdioMCPServer:
     def run(self) -> None:
         watcher: threading.Thread | None = None
         if self.watch_registry:
-            watcher = threading.Thread(target=self._watch, name="skill-mcp-registry", daemon=True)
+            watcher = threading.Thread(target=self._watch, name="skilldock-registry", daemon=True)
             watcher.start()
         try:
             for raw_line in sys.stdin.buffer:
