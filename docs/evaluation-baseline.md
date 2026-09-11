@@ -75,16 +75,24 @@ metadata or an enrichment layer.
 ## Reproduce
 
 ```console
-skilldock install NomaDamas/k-skill --all \
-  --hot-skill korea-weather --hot-skill korean-transit-route \
-  --hot-skill delivery-tracking --hot-skill korean-spell-check \
-  --hot-skill korean-cinema-search
-skilldock install mattpocock/skills --all \
-  --hot-skill diagnosing-bugs --hot-skill code-review --hot-skill tdd \
-  --hot-skill research --hot-skill to-spec
+skilldock install NomaDamas/k-skill --all
+skilldock install mattpocock/skills --all
+skilldock hot add korea-weather
+skilldock hot add korean-transit-route
+skilldock hot add delivery-tracking
+skilldock hot add korean-spell-check
+skilldock hot add korean-cinema-search
+skilldock hot add diagnosing-bugs
+skilldock hot add code-review
+skilldock hot add tdd
+skilldock hot add research
+skilldock hot add to-spec
 skilldock eval evals/retrieval_queries.yaml --min-skills 150 \
   --output retrieval-result.json
 ```
+
+Those ten HOT commands reproduce this historical benchmark only. They are not a recommended
+default and must not be run during normal installation without the user's exact selection.
 
 The result JSON records the dataset digest, exact installed source revisions, corpus sizes,
 revision mismatches against the frozen dataset, aggregate slices, and every query's Top-5 ranking.

@@ -64,6 +64,11 @@ class SkillRuntime:
         allow_scripts: bool = False,
         ref: str | None = None,
     ) -> list[SkillRecord]:
+        if hot or hot_selectors:
+            raise ValueError(
+                "Installation cannot change HOT state. Install first, review `skilldock list`, "
+                "then make each user-selected skill HOT with `skilldock hot add <skill>`."
+            )
         identity = self.sources.identify(source)
         state = self.registry.load()
         existing_source = state.sources.get(identity.id)
@@ -82,14 +87,6 @@ class SkillRuntime:
             if not candidates:
                 raise DiscoveryError(f'No compatible Agent Skills found in source "{source}"')
             selected = _select_candidates(candidates, selectors)
-            selected_hot_paths = (
-                {
-                    candidate.relative_path
-                    for candidate in _select_candidates(selected, hot_selectors)
-                }
-                if hot_selectors
-                else set()
-            )
             now = _now()
             source_record = SourceRecord(
                 id=identity.id,
@@ -124,11 +121,7 @@ class SkillRuntime:
                         content_digest=self._candidate_digest(
                             candidate, source_record, materialized.path
                         ),
-                        hot=(
-                            hot
-                            or candidate.relative_path in selected_hot_paths
-                            or (old.hot if old else False)
-                        ),
+                        hot=old.hot if old else False,
                         trusted=allow_scripts or (old.trusted if old else False),
                         metadata=candidate.metadata,
                         tool_name=old.tool_name

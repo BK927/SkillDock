@@ -34,12 +34,12 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument(
         "--all", action="store_true", help="Install all discovered skills (the default)."
     )
-    install.add_argument("--hot", action="store_true", help="Mark every selected skill HOT.")
+    install.add_argument("--hot", action="store_true", help=argparse.SUPPRESS)
     install.add_argument(
         "--hot-skill",
         action="append",
         dest="hot_skills",
-        help="Mark only this installed name or relative path HOT; repeatable.",
+        help=argparse.SUPPRESS,
     )
     install.add_argument(
         "--allow-scripts",
@@ -127,6 +127,12 @@ def main(argv: list[str] | None = None) -> None:
 
 def dispatch(runtime: SkillRuntime, args: argparse.Namespace) -> Any:
     if args.command == "install":
+        if args.hot or args.hot_skills:
+            raise ValueError(
+                "Installation cannot change HOT state. Install first, review `skilldock list`, "
+                "then run `skilldock hot add <skill>` for each skill explicitly selected by "
+                "the user."
+            )
         installed = runtime.install(
             args.source,
             selectors=args.skills,

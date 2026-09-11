@@ -37,7 +37,8 @@ def test_two_sources_coexist_and_name_collision_requires_canonical_id(runtime, s
 
 
 def test_only_hot_skills_become_individual_mcp_tools(runtime, source_a):
-    installed = runtime.install(str(source_a), selectors=["frontend-design"], hot=True)
+    installed = runtime.install(str(source_a), selectors=["frontend-design"])
+    runtime.set_hot(installed[0].id, True)
     runtime.install(str(source_a), selectors=["systematic-debugging"])
 
     tools = ToolFactory(runtime).build()
@@ -56,7 +57,8 @@ def test_only_hot_skills_become_individual_mcp_tools(runtime, source_a):
 
 
 def test_non_hot_skill_is_searchable_and_loadable(runtime, source_a):
-    runtime.install(str(source_a), selectors=["frontend-design"], hot=True)
+    frontend = runtime.install(str(source_a), selectors=["frontend-design"])[0]
+    runtime.set_hot(frontend.id, True)
     runtime.install(str(source_a), selectors=["systematic-debugging"])
 
     result = runtime.find_skills("methodically debug software with evidence")
@@ -79,7 +81,9 @@ def test_hot_add_remove_is_persistent_across_runtime_restart(runtime, source_a):
 
 
 def test_uninstall_removes_only_selected_skill(runtime, source_a):
-    runtime.install(str(source_a), hot=True)
+    installed = runtime.install(str(source_a))
+    for skill in installed:
+        runtime.set_hot(skill.id, True)
     removed = runtime.uninstall("frontend-design")
 
     assert removed.hot is True
@@ -134,7 +138,8 @@ def test_removing_source_does_not_affect_other_source(runtime, source_a, source_
 def test_local_source_update_refreshes_metadata_but_preserves_hot(runtime, tmp_path):
     source = tmp_path / "updatable"
     make_skill(source, "weather", "weather", "Find today's local weather.", "# Before")
-    runtime.install(str(source), hot=True)
+    installed = runtime.install(str(source))
+    runtime.set_hot(installed[0].id, True)
     make_skill(source, "weather", "weather", "Find forecasts and severe weather.", "# After")
 
     runtime.update()
@@ -150,17 +155,42 @@ def test_installing_specific_skill_does_not_install_every_discovered_skill(runti
     assert [skill.name for skill in runtime.list_skills()] == ["systematic-debugging"]
 
 
-def test_install_all_can_select_only_a_hot_subset(runtime, source_a):
-    installed = runtime.install(str(source_a), hot_selectors=["frontend-design"])
+def test_hot_selection_is_a_separate_explicit_step(runtime, source_a):
+    installed = runtime.install(str(source_a))
+    runtime.set_hot("frontend-design", True)
 
     assert len(installed) == 2
-    assert {skill.name for skill in installed if skill.hot} == {"frontend-design"}
+    assert {skill.name for skill in runtime.list_skills() if skill.hot} == {"frontend-design"}
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"hot": True},
+        {"hot_selectors": ["frontend-design"]},
+    ],
+)
+def test_install_rejects_legacy_hot_promotion(runtime, source_a, options):
+    with pytest.raises(ValueError, match="Installation cannot change HOT state"):
+        runtime.install(str(source_a), **options)
+    assert runtime.list_skills() == []
+
+
+def test_reinstall_preserves_existing_hot_choice_but_never_creates_one(runtime, source_a):
+    runtime.install(str(source_a), selectors=["frontend-design"])
+    runtime.set_hot("frontend-design", True)
+
+    runtime.install(str(source_a))
+
+    assert runtime.get_skill("frontend-design").hot is True
+    assert runtime.get_skill("systematic-debugging").hot is False
 
 
 def test_reconcile_previews_then_applies_new_updated_and_missing_without_choice_mutation(
     runtime, source_a
 ):
-    runtime.install(str(source_a), hot_selectors=["frontend-design"])
+    runtime.install(str(source_a))
+    runtime.set_hot("frontend-design", True)
     make_skill(
         source_a,
         "nested/systematic-debugging",

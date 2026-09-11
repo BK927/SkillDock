@@ -56,7 +56,8 @@ class MCPProcess:
 def test_stdio_initialize_list_and_call_round_trip(tmp_path, source_a):
     home = tmp_path / "mcp-home"
     runtime = SkillRuntime(home)
-    installed = runtime.install(str(source_a), selectors=["frontend-design"], hot=True)
+    installed = runtime.install(str(source_a), selectors=["frontend-design"])
+    runtime.set_hot(installed[0].id, True)
     process = MCPProcess(home)
     try:
         initialized = process.request(

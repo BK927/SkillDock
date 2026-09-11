@@ -57,19 +57,31 @@ skilldock install https://github.com/NomaDamas/k-skill
 skilldock install mattpocock/skills --all
 ```
 
-Install selected skills and make them immediately visible as HOT tools:
+Install selected skills without exposing them as HOT tools:
 
 ```console
 skilldock install https://github.com/example/skills \
-  --skill frontend-design --skill debugging --hot
+  --skill frontend-design --skill debugging
 ```
 
-Install everything while selecting only a subset for HOT exposure:
+Review the installed inventory, then explicitly expose only skills the user selected:
 
 ```console
-skilldock install https://github.com/example/skills --all \
-  --hot-skill frontend-design --hot-skill debugging
+skilldock list
+skilldock hot add github:example/skills/frontend-design
+skilldock hot add github:example/skills/debugging
 ```
+
+### HOT consent policy
+
+Installation never changes HOT state. The same is true for `update` and `reconcile`: they preserve
+an existing user choice but cannot create a new one. Only `skilldock hot add` and
+`skilldock hot remove` may change the HOT tier.
+
+The person operating SkillDock must choose every HOT skill by exact name or canonical ID after
+reviewing `skilldock list`. Agents, deployment scripts, installers, and repository metadata must
+not infer a HOT set, choose a convenient default, or promote all installed skills. The deprecated
+install-time `--hot` and `--hot-skill` options now fail with guidance instead of changing state.
 
 Local directories use the same flow and are copied into managed storage:
 
@@ -93,7 +105,8 @@ skilldock reconcile mattpocock/skills --apply
 
 `reconcile` is preview-only unless `--apply` is given. Applying refreshes installed metadata,
 instructions, and missing state, but does not install NEW skills or delete MISSING ones.
-`skilldock update` remains a backward-compatible shorthand for the safe apply behavior.
+It also preserves, but never creates, HOT choices. `skilldock update` remains a
+backward-compatible shorthand for the safe apply behavior.
 
 Short names work only when unambiguous. If two sources contain `frontend-design`, use the
 canonical ID shown by `skilldock list`, for example

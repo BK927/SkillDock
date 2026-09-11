@@ -49,6 +49,11 @@ not installed backends; the default remains offline and dependency-light.
 only records with `hot=true` get an individual activation tool. Tool names are persisted so
 restarts do not rename them.
 
+HOT is a user-consent boundary, not an installation option. Source installation, update, adapter
+metadata, and reconciliation cannot promote a skill. They preserve existing choices only. The
+dedicated `hot add/remove` commands are the sole mutation path, and operators must not invoke
+`hot add` without an exact user-selected skill.
+
 `StdioMCPServer` implements the MCP JSON-RPC lifecycle and tool messages. A registry watcher
 emits the standard tool-list-changed notification, while hosts that ignore it remain correct
 after reconnect.

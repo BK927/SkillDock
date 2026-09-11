@@ -4,8 +4,9 @@ from skill_mcp.evaluation import evaluate_retrieval
 
 
 def test_evaluation_reports_top_k_by_route_language_and_category(runtime, source_a, tmp_path):
-    installed = runtime.install(str(source_a), hot_selectors=["frontend-design"])
+    installed = runtime.install(str(source_a))
     by_name = {skill.name: skill for skill in installed}
+    runtime.set_hot(by_name["frontend-design"].id, True)
     dataset = tmp_path / "queries.yaml"
     dataset.write_text(
         f"""\

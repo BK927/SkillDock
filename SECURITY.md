@@ -9,6 +9,8 @@ runtime mechanics, but the MCP host and user must still review third-party instr
 - Installing a skill does not grant script execution permission.
 - Script execution requires the per-skill `trusted` flag set by explicit `--allow-scripts`.
 - MCP exposes no install, uninstall, source update, HOT mutation, or script execution tools.
+- Installation, update, and reconciliation cannot create HOT choices. Only the dedicated CLI
+  `hot add/remove` commands can change that user-controlled tier.
 - Asset reads are limited to `references/`, `assets/`, and recognized text files in `scripts/`.
 - Absolute paths, drive paths, dot segments, and `..` traversal are rejected.
 - Real paths must remain descendants of the installed skill root, blocking symlink escape.
