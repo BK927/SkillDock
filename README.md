@@ -137,6 +137,11 @@ after reconnecting.
 
 ## MCP tool model
 
+For a home-server deployment through a secure stdio tunnel, see
+[access and deployment](docs/ACCESS.md). The tunnel controls remote access;
+SkillDock does not require an additional web-login password.
+
+
 Always visible:
 
 - `find_skills(task, limit=5, include_hot=false)` searches installed non-HOT skills.
